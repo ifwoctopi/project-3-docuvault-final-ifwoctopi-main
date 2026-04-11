@@ -1,0 +1,154 @@
+# =======================================================================
+# DocuVault Final — GitHub Classroom Autograder
+#
+# DO NOT MODIFY this file.
+#
+# Workflow:
+#   1. Compile the test client.
+#   2. Run each test group (run_test_final.sh manages compose lifecycle).
+#   3. Report aggregated results to GitHub Classroom.
+# =======================================================================
+
+name: Final Autograding Tests
+on:
+  - push
+  - workflow_dispatch
+
+permissions:
+  checks: write
+  actions: read
+  contents: read
+
+jobs:
+  run-autograding-tests:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-classroom[bot]'
+    timeout-minutes: 30
+
+    steps:
+      # ---------------------------------------------------------------
+      # Setup — continue-on-error so grader steps always run.
+      # ---------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile test client
+        run: |
+          g++ -std=c++17 -O2 -pthread -o /tmp/docuvault_test_client_final \
+              tests/test_client_final.cpp
+          chmod +x /tmp/docuvault_test_client_final
+          chmod +x .github/classroom/run_test_final.sh
+        continue-on-error: true
+
+      # ---------------------------------------------------------------
+      # Test groups — `if: always()` ensures every grader step runs
+      # and produces output for the reporter.
+      # ---------------------------------------------------------------
+      - name: "Test: Cluster Start"
+        id: cluster-start
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Cluster Start
+          command: bash .github/classroom/run_test_final.sh cluster_start
+          timeout: 5
+          max-score: 4
+        if: always()
+
+      - name: "Test: Login / Routing"
+        id: login-routing
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Login / Routing
+          command: bash .github/classroom/run_test_final.sh login_routing
+          timeout: 5
+          max-score: 4
+        if: always()
+
+      - name: "Test: Write Replication"
+        id: write-replication
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Write Replication
+          command: bash .github/classroom/run_test_final.sh write_replication
+          timeout: 5
+          max-score: 7
+        if: always()
+
+      - name: "Test: Read from Replica"
+        id: read-replica
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Read from Replica
+          command: bash .github/classroom/run_test_final.sh read_replica
+          timeout: 5
+          max-score: 5
+        if: always()
+
+      - name: "Test: Delete Replication"
+        id: delete-replication
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Delete Replication
+          command: bash .github/classroom/run_test_final.sh delete_replication
+          timeout: 5
+          max-score: 5
+        if: always()
+
+      - name: "Test: HMAC Rejection"
+        id: hmac-rejection
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: HMAC Rejection
+          command: bash .github/classroom/run_test_final.sh hmac_rejection
+          timeout: 5
+          max-score: 6
+        if: always()
+
+      - name: "Test: Write Lock"
+        id: write-lock
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Write Lock
+          command: bash .github/classroom/run_test_final.sh write_lock
+          timeout: 5
+          max-score: 6
+        if: always()
+
+      - name: "Test: Deadlock Timeout"
+        id: deadlock-timeout
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: Deadlock Timeout
+          command: bash .github/classroom/run_test_final.sh deadlock_timeout
+          timeout: 5
+          max-score: 6
+        if: always()
+
+      - name: "Test: RPC Structure"
+        id: rpc-structure
+        uses: classroom-resources/autograding-command-grader@v1
+        with:
+          test-name: RPC Structure
+          command: bash .github/classroom/run_test_final.sh rpc_structure
+          timeout: 1
+          max-score: 2
+        if: always()
+
+      # ---------------------------------------------------------------
+      # Reporter
+      # ---------------------------------------------------------------
+      - name: Autograding Reporter
+        uses: classroom-resources/autograding-grading-reporter@v1
+        with:
+          runners: cluster-start,login-routing,write-replication,read-replica,delete-replication,hmac-rejection,write-lock,deadlock-timeout,rpc-structure
+        env:
+          CLUSTER-START_RESULTS:      "${{steps.cluster-start.outputs.result}}"
+          LOGIN-ROUTING_RESULTS:      "${{steps.login-routing.outputs.result}}"
+          WRITE-REPLICATION_RESULTS:  "${{steps.write-replication.outputs.result}}"
+          READ-REPLICA_RESULTS:       "${{steps.read-replica.outputs.result}}"
+          DELETE-REPLICATION_RESULTS: "${{steps.delete-replication.outputs.result}}"
+          HMAC-REJECTION_RESULTS:     "${{steps.hmac-rejection.outputs.result}}"
+          WRITE-LOCK_RESULTS:         "${{steps.write-lock.outputs.result}}"
+          DEADLOCK-TIMEOUT_RESULTS:   "${{steps.deadlock-timeout.outputs.result}}"
+          RPC-STRUCTURE_RESULTS:      "${{steps.rpc-structure.outputs.result}}"
+        if: always()
