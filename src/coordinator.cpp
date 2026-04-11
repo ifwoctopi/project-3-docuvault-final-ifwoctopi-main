@@ -1,4 +1,5 @@
 #include "coordinator.h"
+#include "fs.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -185,37 +186,36 @@ void Coordinator::handleClient(int client_fd)
         }
 
         if (!authenticated) {
-            sendResponse(client_fd, "ERR_NOT_AUTHENTICATED");
+            sendResponse(client_fd, "ERR_UNAUTHORIZED");  // was ERR_NOT_AUTHENTICATED
             continue;
         }
 
         // ── WRITE ────────────────────────────────────────────────
         // Syntax: WRITE <path> <byte_count> <perms>
         if (cmd == "WRITE") {
-            if (tokens.size() < 4) {
+            if (tokens.size() < 3) {          // was < 4
                 sendResponse(client_fd, "ERR_BAD_REQUEST");
                 continue;
             }
             const std::string& path = tokens[1];
-            size_t   byte_count     = std::stoull(tokens[2]);
-            uint16_t perms          = static_cast<uint16_t>(
-                                          std::stoul(tokens[3]));
+            size_t byte_count       = std::stoull(tokens[2]);
             std::string body        = readBytes(client_fd, byte_count);
-
             if (!acquireWriteLock(path)) {
                 sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
                 continue;
             }
-
-            AckResult ra = storage_a_.write(path, body, username, perms);
-            AckResult rb = storage_b_.write(path, body, username, perms);
-
+            
+            AckResult ra = storage_a_.write(path, body, username, DEFAULT_FILE_PERMS);
+            AckResult rb = storage_b_.write(path, body, username, DEFAULT_FILE_PERMS);
             releaseWriteLock(path);
-
             if (ra.success && rb.success)
+            {
                 sendResponse(client_fd, "OK");
+            }
             else
+            {
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            }
             continue;
         }
 
@@ -256,14 +256,16 @@ void Coordinator::handleClient(int client_fd)
             std::string data;
             AckResult r = storage_a_.read(tokens[1], data);
             if (!r.success) {
-                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+                // Forward the storage error directly so ERR_NOT_FOUND etc. reach client
+                sendResponse(client_fd, r.error_msg.empty()
+                                        ? "ERR_STORAGE_FAILURE"
+                                        : r.error_msg);
             } else {
-                sendResponse(client_fd,
-                             "OK " + std::to_string(data.size()));
+                sendResponse(client_fd, "OK " + std::to_string(data.size()));
                 sendRaw(client_fd, data.c_str(), data.size());
             }
             continue;
-        }
+}
 
         // ── LIST ─────────────────────────────────────────────────
         // Syntax: LIST <path>
@@ -326,7 +328,7 @@ void Coordinator::handleClient(int client_fd)
             if (ra.success && rb.success)
                 sendResponse(client_fd, "OK");
             else
-                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+                sendResponse(client_fd, ra.success ? rb.error_msg : ra.error_msg);
             continue;
         }
 

@@ -210,7 +210,7 @@ static void handleConnection(int client_fd,
                 std::vector<uint8_t> resp(data.begin(), data.end());
                 sendAckOk(client_fd, secret, resp);
             } else {
-                sendAckErr(client_fd, secret, "file not found");
+                sendAckErr(client_fd, secret, "ERR_NOT_FOUND");  // was "file not found"
             }
             break;
         }
@@ -223,7 +223,7 @@ static void handleConnection(int client_fd,
             }
             bool ok = fs.deleteFile(fields[0]);
             if (ok) sendAckOk(client_fd, secret);
-            else    sendAckErr(client_fd, secret, "delete failed");
+            else    sendAckErr(client_fd, secret, "ERR_NOT_FOUND");  // was "delete failed"
             break;
         }
 
