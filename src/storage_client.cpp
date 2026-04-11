@@ -128,8 +128,10 @@ void StorageClient::computeHMAC(const uint8_t* data, size_t len,
 // ===================================================================
 
 // Internal versions — caller must hold io_mutex_
-// In StorageClient::sendFrame (storage_client.cpp)
-bool StorageClient::sendFrame(MessageType type, const std::vector<uint8_t>& payload) {
+bool StorageClient::sendFrame(MessageType type,
+                              const std::vector<uint8_t>& payload)
+{
+    // REMOVE the lock_guard from here
     uint32_t magic_ne  = htonl(PROTO_MAGIC);
     uint8_t  type_byte = static_cast<uint8_t>(type);
     uint32_t plen_ne   = htonl(static_cast<uint32_t>(payload.size()));
@@ -140,16 +142,13 @@ bool StorageClient::sendFrame(MessageType type, const std::vector<uint8_t>& payl
     if (!payload.empty())
         if (!sendAll(payload.data(), payload.size())) return false;
 
-    // --- UPDATED HMAC CONSTRUCTION ---
     std::vector<uint8_t> signable;
     signable.reserve(5 + payload.size());
     signable.push_back(type_byte);
-    
-    // Copy the 4 bytes of length exactly as they were sent in plen_ne
-    uint8_t plen_bytes[4];
-    std::memcpy(plen_bytes, &plen_ne, 4);
-    signable.insert(signable.end(), plen_bytes, plen_bytes + 4);
-    
+    signable.push_back(static_cast<uint8_t>((payload.size() >> 24) & 0xFF));
+    signable.push_back(static_cast<uint8_t>((payload.size() >> 16) & 0xFF));
+    signable.push_back(static_cast<uint8_t>((payload.size() >>  8) & 0xFF));
+    signable.push_back(static_cast<uint8_t>( payload.size()        & 0xFF));
     signable.insert(signable.end(), payload.begin(), payload.end());
 
     uint8_t tag[HMAC_SIZE];

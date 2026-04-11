@@ -256,9 +256,11 @@ static void handleConnection(int client_fd,
                 sendAckErr(client_fd, secret, "malformed MKDIR payload");
                 break;
             }
-            bool ok = fs.createDirectory(fields[0], fields[1]);
+            // Treat already-exists as success — idempotent mkdir
+            bool ok = fs.createDirectory(fields[0], fields[1])
+                    || fs.pathExists(fields[0]);
             if (ok) sendAckOk(client_fd, secret);
-            else    sendAckErr(client_fd, secret, "mkdir failed");
+            else    sendAckErr(client_fd, secret, "ERR_MKDIR_FAILED");
             break;
         }
 

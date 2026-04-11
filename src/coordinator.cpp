@@ -192,37 +192,32 @@ void Coordinator::handleClient(int client_fd)
 
         // ── WRITE ────────────────────────────────────────────────
         // Syntax: WRITE <path> <byte_count> <perms>
-        // In Coordinator::handleClient (coordinator.cpp)
-if (cmd == "WRITE") {
-    // Revert to 4 if your protocol includes perms, or keep at 3 but handle carefully
-    if (tokens.size() < 3) { 
-        sendResponse(client_fd, "ERR_BAD_REQUEST");
-        continue;
-    }
-    const std::string& path = tokens[1];
-    size_t byte_count = std::stoull(tokens[2]);
-    
-    // Extract perms if provided, else use default
-    uint16_t perms = (tokens.size() >= 4) ? 
-                     static_cast<uint16_t>(std::stoul(tokens[3], nullptr, 8)) : 
-                     DEFAULT_FILE_PERMS;
-
-    std::string body = readBytes(client_fd, byte_count);
-
-    if (!acquireWriteLock(path)) {
-        sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
-        continue;
-    }
-    
-    AckResult ra = storage_a_.write(path, body, username, perms);
-    AckResult rb = storage_b_.write(path, body, username, perms);
-    releaseWriteLock(path);
-
-    if (ra.success && rb.success) sendResponse(client_fd, "OK");
-    else sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-    
-    continue;
-}
+        if (cmd == "WRITE") {
+            if (tokens.size() < 3) {          // was < 4
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            const std::string& path = tokens[1];
+            size_t byte_count       = std::stoull(tokens[2]);
+            std::string body        = readBytes(client_fd, byte_count);
+            if (!acquireWriteLock(path)) {
+                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+                continue;
+            }
+            
+            AckResult ra = storage_a_.write(path, body, username, DEFAULT_FILE_PERMS);
+            AckResult rb = storage_b_.write(path, body, username, DEFAULT_FILE_PERMS);
+            releaseWriteLock(path);
+            if (ra.success && rb.success)
+            {
+                sendResponse(client_fd, "OK");
+            }
+            else
+            {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            }
+            continue;
+        }
 
         // ── DELETE ───────────────────────────────────────────────
         // Syntax: DELETE <path>
@@ -314,29 +309,33 @@ if (cmd == "WRITE") {
         // ── MKDIR ────────────────────────────────────────────────
         // Syntax: MKDIR <path>
         if (cmd == "MKDIR") {
-    if (tokens.size() < 2) {
-        sendResponse(client_fd, "ERR_BAD_REQUEST");
-        continue;
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            const std::string& path = tokens[1];
+
+            if (!acquireWriteLock(path)) {
+                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+                continue;
+            }
+
+            AckResult ra = storage_a_.mkdir(path, username);
+            AckResult rb = storage_b_.mkdir(path, username);
+
+            releaseWriteLock(path);
+
+            if (ra.success && rb.success)
+                sendResponse(client_fd, "OK");
+            else
+                sendResponse(client_fd, ra.success ? rb.error_msg : ra.error_msg);
+            continue;
+        }
+
+        sendResponse(client_fd, "ERR_UNKNOWN_COMMAND");
     }
-    const std::string& path = tokens[1];
 
-    if (!acquireWriteLock(path)) {
-        sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
-        continue;
-    }
-
-    AckResult ra = storage_a_.mkdir(path, username);
-    AckResult rb = storage_b_.mkdir(path, username);
-
-    releaseWriteLock(path);
-
-    if (ra.success && rb.success) {
-        sendResponse(client_fd, "OK");
-    } else {
-        // Use the explicit error string the autograder expects
-        sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-    }
-    continue;
+    close(client_fd);
 }
 
 // ===================================================================
