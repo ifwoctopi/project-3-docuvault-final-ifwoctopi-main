@@ -11,7 +11,7 @@
 #include <unistd.h>
 
 // ===================================================================
-// I/O HELPERS — reused from Checkpoint 1, do not modify
+// I/O HELPERS — do not modify
 // ===================================================================
 
 std::string Coordinator::readLine(int fd)
@@ -88,7 +88,6 @@ Coordinator::Coordinator(int port,
 
 void Coordinator::run()
 {
-    // Connect to both storage nodes.
     if (!storage_a_.connect()) {
         std::cerr << "ERROR: cannot connect to storage-a" << std::endl;
         return;
@@ -150,7 +149,7 @@ void Coordinator::run()
 
 void Coordinator::handleClient(int client_fd)
 {
-    bool authenticated = false;
+    bool        authenticated = false;
     std::string username;
 
     while (true) {
@@ -168,7 +167,7 @@ void Coordinator::handleClient(int client_fd)
                 sendResponse(client_fd, "ERR_BAD_REQUEST");
                 continue;
             }
-            if (auth_.verify(tokens[1], tokens[2])) {
+            if (auth_.authenticate(tokens[1], tokens[2])) {
                 authenticated = true;
                 username      = tokens[1];
                 sendResponse(client_fd, "OK");
@@ -199,7 +198,8 @@ void Coordinator::handleClient(int client_fd)
             }
             const std::string& path = tokens[1];
             size_t   byte_count     = std::stoull(tokens[2]);
-            uint16_t perms          = static_cast<uint16_t>(std::stoul(tokens[3]));
+            uint16_t perms          = static_cast<uint16_t>(
+                                          std::stoul(tokens[3]));
             std::string body        = readBytes(client_fd, byte_count);
 
             if (!acquireWriteLock(path)) {
@@ -212,11 +212,10 @@ void Coordinator::handleClient(int client_fd)
 
             releaseWriteLock(path);
 
-            if (ra.success && rb.success) {
+            if (ra.success && rb.success)
                 sendResponse(client_fd, "OK");
-            } else {
+            else
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-            }
             continue;
         }
 
@@ -239,11 +238,10 @@ void Coordinator::handleClient(int client_fd)
 
             releaseWriteLock(path);
 
-            if (ra.success && rb.success) {
+            if (ra.success && rb.success)
                 sendResponse(client_fd, "OK");
-            } else {
+            else
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-            }
             continue;
         }
 
@@ -260,7 +258,8 @@ void Coordinator::handleClient(int client_fd)
             if (!r.success) {
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
             } else {
-                sendResponse(client_fd, "OK " + std::to_string(data.size()));
+                sendResponse(client_fd,
+                             "OK " + std::to_string(data.size()));
                 sendRaw(client_fd, data.c_str(), data.size());
             }
             continue;
@@ -279,7 +278,8 @@ void Coordinator::handleClient(int client_fd)
             if (!r.success) {
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
             } else {
-                sendResponse(client_fd, "OK " + std::to_string(entries.size()));
+                sendResponse(client_fd,
+                             "OK " + std::to_string(entries.size()));
                 for (const auto& e : entries)
                     sendResponse(client_fd, e);
             }
@@ -304,33 +304,32 @@ void Coordinator::handleClient(int client_fd)
             continue;
         }
 
-        // ── MKDIR ─────────────────────────────────────────────────
+        // ── MKDIR ────────────────────────────────────────────────
         // Syntax: MKDIR <path>
         if (cmd == "MKDIR") {
             if (tokens.size() < 2) {
                 sendResponse(client_fd, "ERR_BAD_REQUEST");
                 continue;
             }
-            // MKDIR is a metadata mutation — replicate to both nodes.
-            if (!acquireWriteLock(tokens[1])) {
+            const std::string& path = tokens[1];
+
+            if (!acquireWriteLock(path)) {
                 sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
                 continue;
             }
 
-            AckResult ra = storage_a_.mkdir(tokens[1], username);
-            AckResult rb = storage_b_.mkdir(tokens[1], username);
+            AckResult ra = storage_a_.mkdir(path, username);
+            AckResult rb = storage_b_.mkdir(path, username);
 
-            releaseWriteLock(tokens[1]);
+            releaseWriteLock(path);
 
-            if (ra.success && rb.success) {
+            if (ra.success && rb.success)
                 sendResponse(client_fd, "OK");
-            } else {
+            else
                 sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-            }
             continue;
         }
 
-        // ── Unknown command ───────────────────────────────────────
         sendResponse(client_fd, "ERR_UNKNOWN_COMMAND");
     }
 
@@ -343,7 +342,6 @@ void Coordinator::handleClient(int client_fd)
 
 bool Coordinator::acquireWriteLock(const std::string& path)
 {
-    // Get (or create) the WriteLock entry for this path.
     std::shared_ptr<WriteLock> wl;
     {
         std::lock_guard<std::mutex> map_guard(locks_map_mutex_);
@@ -361,15 +359,13 @@ bool Coordinator::acquireWriteLock(const std::string& path)
 
     std::unique_lock<std::mutex> ul(wl->mtx);
 
-    // Wait until the lock is free or the timeout fires.
     bool acquired = wl->cv.wait_until(ul, deadline,
                                       [&wl]{ return !wl->locked; });
 
     if (!acquired) {
-        // Timeout — forcibly steal the lock and warn.
         std::cerr << "WARN: forced lock release on " << path
                   << " after timeout" << std::endl;
-        // Fall through: we take the lock anyway.
+        // Fall through and take the lock anyway.
     }
 
     wl->locked      = true;
@@ -393,14 +389,13 @@ void Coordinator::releaseWriteLock(const std::string& path)
     }
     wl->cv.notify_one();
 }
+
 // ===================================================================
-// MAIN — reads configuration from environment variables
+// MAIN
 // ===================================================================
 
 int main()
 {
-    // Read configuration from environment variables.
-    // docker-compose.yml sets all of these.
     int port = 8080;
 
     const char* env_secret  = std::getenv("DOCUVAULT_SECRET");
