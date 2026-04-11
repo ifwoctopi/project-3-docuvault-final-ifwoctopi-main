@@ -127,27 +127,23 @@ void StorageClient::computeHMAC(const uint8_t* data, size_t len,
 // Frame send / receive
 // ===================================================================
 
+// Internal versions — caller must hold io_mutex_
 bool StorageClient::sendFrame(MessageType type,
                               const std::vector<uint8_t>& payload)
 {
-    std::lock_guard<std::mutex> lock(io_mutex_);
-
-    // ── Header ────────────────────────────────────────────────────
-    uint32_t magic_ne = htonl(PROTO_MAGIC);
+    // REMOVE the lock_guard from here
+    uint32_t magic_ne  = htonl(PROTO_MAGIC);
     uint8_t  type_byte = static_cast<uint8_t>(type);
     uint32_t plen_ne   = htonl(static_cast<uint32_t>(payload.size()));
 
     if (!sendAll(&magic_ne,  4)) return false;
     if (!sendAll(&type_byte, 1)) return false;
     if (!sendAll(&plen_ne,   4)) return false;
-
-    // ── Payload ───────────────────────────────────────────────────
     if (!payload.empty())
         if (!sendAll(payload.data(), payload.size())) return false;
 
-    // ── HMAC over signable region: type(1) + payload_len(4) + payload ──
     std::vector<uint8_t> signable;
-    signable.reserve(1 + 4 + payload.size());
+    signable.reserve(5 + payload.size());
     signable.push_back(type_byte);
     signable.push_back(static_cast<uint8_t>((payload.size() >> 24) & 0xFF));
     signable.push_back(static_cast<uint8_t>((payload.size() >> 16) & 0xFF));
@@ -157,54 +153,40 @@ bool StorageClient::sendFrame(MessageType type,
 
     uint8_t tag[HMAC_SIZE];
     computeHMAC(signable.data(), signable.size(), tag);
-    if (!sendAll(tag, HMAC_SIZE)) return false;
-
-    return true;
+    return sendAll(tag, HMAC_SIZE);
 }
 
 bool StorageClient::recvFrame(MessageFrame& frame)
 {
-    std::lock_guard<std::mutex> lock(io_mutex_);
-
-    // ── Header (9 bytes) ─────────────────────────────────────────
+    // REMOVE the lock_guard from here
     uint8_t header[FRAME_HEADER_SIZE];
     if (!recvAll(header, FRAME_HEADER_SIZE)) return false;
 
     uint32_t magic = 0;
     std::memcpy(&magic, header, 4);
-    magic = ntohl(magic);
-    if (magic != PROTO_MAGIC) {
-        std::cerr << "StorageClient: bad magic 0x" << std::hex << magic << std::endl;
+    if (ntohl(magic) != PROTO_MAGIC) {
+        std::cerr << "StorageClient: bad magic" << std::endl;
         return false;
     }
 
     frame.msg_type = static_cast<MessageType>(header[4]);
-
     uint32_t plen_ne = 0;
     std::memcpy(&plen_ne, header + 5, 4);
     frame.payload_len = ntohl(plen_ne);
 
-    // ── Payload ───────────────────────────────────────────────────
     frame.payload.resize(frame.payload_len);
     if (frame.payload_len > 0)
         if (!recvAll(frame.payload.data(), frame.payload_len)) return false;
 
-    // ── HMAC tag ──────────────────────────────────────────────────
     if (!recvAll(frame.hmac, HMAC_SIZE)) return false;
 
-    // ── Verify: recompute over type(1) + payload_len(4) + payload ──
     std::vector<uint8_t> signable;
-    signable.reserve(1 + 4 + frame.payload_len);
-    signable.push_back(header[4]);                  // type byte (already raw)
-    signable.push_back(header[5]);                  // payload_len bytes (NBO)
-    signable.push_back(header[6]);
-    signable.push_back(header[7]);
-    signable.push_back(header[8]);
+    signable.reserve(5 + frame.payload_len);
+    signable.insert(signable.end(), header + 4, header + 9);
     signable.insert(signable.end(), frame.payload.begin(), frame.payload.end());
 
     uint8_t expected[HMAC_SIZE];
     computeHMAC(signable.data(), signable.size(), expected);
-
     if (std::memcmp(expected, frame.hmac, HMAC_SIZE) != 0) {
         std::cerr << "StorageClient: HMAC verification failed" << std::endl;
         return false;
@@ -212,6 +194,7 @@ bool StorageClient::recvFrame(MessageFrame& frame)
 
     return true;
 }
+
 
 // ===================================================================
 // RPC helper — send a frame and receive the ACK, with io_mutex_
@@ -232,23 +215,13 @@ AckResult StorageClient::write(const std::string& path,
                                const std::string& owner,
                                uint16_t perms)
 {
-    // Payload: path\0  owner\0  perms_str\0  <raw file bytes>
-    auto payload = packFields(
-        { path, owner, std::to_string(perms) },
-        data
-    );
-
+    auto payload = packFields({ path, owner, std::to_string(perms) }, data);
+    std::lock_guard<std::mutex> lock(io_mutex_);  // lock covers send + recv
     if (!sendFrame(MSG_FORWARD_WRITE, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
-    if (ack.msg_type == MSG_ACK_OK)
-        return AckResult{true};
-
-    // ACK_ERR payload is a human-readable error string.
+    if (!recvFrame(ack)) return makeErr("recv failed");
+    if (ack.msg_type == MSG_ACK_OK) return AckResult{true};
     std::string err(ack.payload.begin(), ack.payload.end());
     return makeErr(err);
 }
@@ -257,69 +230,45 @@ AckResult StorageClient::read(const std::string& path,
                               std::string& data_out)
 {
     auto payload = packFields({ path });
-
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!sendFrame(MSG_FORWARD_READ, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
+    if (!recvFrame(ack)) return makeErr("recv failed");
     if (ack.msg_type != MSG_ACK_OK) {
         std::string err(ack.payload.begin(), ack.payload.end());
-        return makeErr(err);
+        return makeErr(err.empty() ? "ERR_STORAGE_FAILURE" : err);
     }
-
-    // ACK_OK payload for READ: path\0 <raw file bytes>
-    // We only need the file bytes — skip past the first null-term field.
-    std::vector<std::string> fields;
-    size_t data_offset = 0;
-    if (unpackFields(ack.payload, 1, fields, data_offset)) {
-        data_out.assign(ack.payload.begin() + data_offset, ack.payload.end());
-    } else {
-        // No field prefix — payload is raw file data.
-        data_out.assign(ack.payload.begin(), ack.payload.end());
-    }
-
+    data_out.assign(ack.payload.begin(), ack.payload.end());
     return AckResult{true};
 }
 
 AckResult StorageClient::remove(const std::string& path)
 {
     auto payload = packFields({ path });
-
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!sendFrame(MSG_FORWARD_DELETE, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
-    if (ack.msg_type == MSG_ACK_OK)
-        return AckResult{true};
-
+    if (!recvFrame(ack)) return makeErr("recv failed");
+    if (ack.msg_type == MSG_ACK_OK) return AckResult{true};
     std::string err(ack.payload.begin(), ack.payload.end());
-    return makeErr(err);
+    return makeErr(err.empty() ? "ERR_NOT_FOUND" : err);
 }
 
 AckResult StorageClient::list(const std::string& path,
                               std::vector<std::string>& entries_out)
 {
     auto payload = packFields({ path });
-
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!sendFrame(MSG_FORWARD_LIST, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
+    if (!recvFrame(ack)) return makeErr("recv failed");
     if (ack.msg_type != MSG_ACK_OK) {
         std::string err(ack.payload.begin(), ack.payload.end());
         return makeErr(err);
     }
-
-    // ACK_OK payload for LIST: entry\0 entry\0 ... entry\0
     entries_out.clear();
     size_t pos = 0;
     while (pos < ack.payload.size()) {
@@ -329,7 +278,6 @@ AckResult StorageClient::list(const std::string& path,
                                  ack.payload.begin() + end);
         pos = end + 1;
     }
-
     return AckResult{true};
 }
 
@@ -337,17 +285,12 @@ AckResult StorageClient::mkdir(const std::string& path,
                                const std::string& owner)
 {
     auto payload = packFields({ path, owner });
-
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!sendFrame(MSG_FORWARD_MKDIR, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
-    if (ack.msg_type == MSG_ACK_OK)
-        return AckResult{true};
-
+    if (!recvFrame(ack)) return makeErr("recv failed");
+    if (ack.msg_type == MSG_ACK_OK) return AckResult{true};
     std::string err(ack.payload.begin(), ack.payload.end());
     return makeErr(err);
 }
@@ -356,20 +299,15 @@ AckResult StorageClient::stat(const std::string& path,
                               std::string& stat_out)
 {
     auto payload = packFields({ path });
-
+    std::lock_guard<std::mutex> lock(io_mutex_);
     if (!sendFrame(MSG_FORWARD_STAT, payload))
         return makeErr("send failed");
-
     MessageFrame ack;
-    if (!recvFrame(ack))
-        return makeErr("recv failed");
-
+    if (!recvFrame(ack)) return makeErr("recv failed");
     if (ack.msg_type != MSG_ACK_OK) {
         std::string err(ack.payload.begin(), ack.payload.end());
         return makeErr(err);
     }
-
-    // ACK_OK payload for STAT is the stat string directly.
     stat_out.assign(ack.payload.begin(), ack.payload.end());
     return AckResult{true};
 }
