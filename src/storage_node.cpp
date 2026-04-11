@@ -40,7 +40,7 @@ static bool recvAll(int fd, void* buf, size_t len)
 }
 
 // ===================================================================
-// HMAC VERIFICATION
+// HMAC
 // ===================================================================
 
 static void computeHMAC(const std::string& secret,
@@ -71,27 +71,21 @@ static bool sendAck(int fd, const std::string& secret,
                     MessageType type,
                     const std::vector<uint8_t>& payload)
 {
-    // 1. Magic (4 bytes, NBO)
-    uint32_t magic_ne = htonl(PROTO_MAGIC);
-    if (!sendAll(fd, &magic_ne, 4)) return false;
+    uint32_t magic_ne  = htonl(PROTO_MAGIC);
+    uint8_t  type_byte = static_cast<uint8_t>(type);
+    uint32_t plen_ne   = htonl(static_cast<uint32_t>(payload.size()));
 
-    // 2. Message type (1 byte)
-    uint8_t type_byte = static_cast<uint8_t>(type);
+    if (!sendAll(fd, &magic_ne,  4)) return false;
     if (!sendAll(fd, &type_byte, 1)) return false;
+    if (!sendAll(fd, &plen_ne,   4)) return false;
 
-    // 3. Payload length (4 bytes, NBO)
-    uint32_t plen_ne = htonl(static_cast<uint32_t>(payload.size()));
-    if (!sendAll(fd, &plen_ne, 4)) return false;
-
-    // 4. Payload bytes
     if (!payload.empty())
         if (!sendAll(fd, payload.data(), payload.size())) return false;
 
-    // 5. HMAC over signable region: type(1) + payload_len(4) + payload
+    // HMAC over type(1) + payload_len_NBO(4) + payload
     std::vector<uint8_t> signable;
-    signable.reserve(1 + 4 + payload.size());
+    signable.reserve(5 + payload.size());
     signable.push_back(type_byte);
-    // Append NBO payload length bytes directly
     signable.push_back(static_cast<uint8_t>((payload.size() >> 24) & 0xFF));
     signable.push_back(static_cast<uint8_t>((payload.size() >> 16) & 0xFF));
     signable.push_back(static_cast<uint8_t>((payload.size() >>  8) & 0xFF));
@@ -105,7 +99,6 @@ static bool sendAck(int fd, const std::string& secret,
     return true;
 }
 
-// Convenience wrappers
 static bool sendAckOk(int fd, const std::string& secret,
                       const std::vector<uint8_t>& payload = {})
 {
@@ -127,69 +120,66 @@ static void handleConnection(int client_fd,
                               FileSystem& fs,
                               const std::string& secret)
 {
-    // Retrieve client IP for log messages.
+    // Get client IP for log messages.
     sockaddr_in peer{};
     socklen_t peer_len = sizeof(peer);
-    getpeername(client_fd,
-                reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
     char peer_ip[INET_ADDRSTRLEN] = "unknown";
     inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
 
     while (true) {
-        // ── 1. Read 9-byte header ─────────────────────────────────
+        // ── Read 9-byte header ────────────────────────────────────
         uint8_t header[FRAME_HEADER_SIZE];
         if (!recvAll(client_fd, header, FRAME_HEADER_SIZE)) break;
 
-        // ── 2. Verify magic ───────────────────────────────────────
+        // ── Verify magic ──────────────────────────────────────────
         uint32_t magic = 0;
         std::memcpy(&magic, header, 4);
-        magic = ntohl(magic);
-        if (magic != PROTO_MAGIC) {
+        if (ntohl(magic) != PROTO_MAGIC) {
             std::cerr << "WARN: bad magic from " << peer_ip << std::endl;
             break;
         }
 
-        MessageType msg_type = static_cast<MessageType>(header[4]);
-
-        uint32_t plen_ne = 0;
+        MessageType msg_type   = static_cast<MessageType>(header[4]);
+        uint32_t    plen_ne    = 0;
         std::memcpy(&plen_ne, header + 5, 4);
-        uint32_t payload_len = ntohl(plen_ne);
+        uint32_t    payload_len = ntohl(plen_ne);
 
-        // ── 3. Read payload ───────────────────────────────────────
+        // ── Read payload ──────────────────────────────────────────
         std::vector<uint8_t> payload(payload_len);
         if (payload_len > 0)
             if (!recvAll(client_fd, payload.data(), payload_len)) break;
 
-        // ── 4. Read HMAC tag ──────────────────────────────────────
+        // ── Read HMAC tag ─────────────────────────────────────────
         uint8_t received_hmac[HMAC_SIZE];
         if (!recvAll(client_fd, received_hmac, HMAC_SIZE)) break;
 
-        // ── 5. Verify HMAC over type(1) + payload_len(4) + payload ─
-        // Re-use the raw NBO bytes from the header (header[4..8]).
+        // ── Verify HMAC (type + payload_len NBO bytes + payload) ──
+        // Reuse the raw NBO bytes already in header[4..8] so the
+        // signable region is byte-for-byte identical to what the
+        // coordinator signed.
         std::vector<uint8_t> signable;
-        signable.reserve(1 + 4 + payload_len);
-        signable.push_back(header[4]);   // type byte
-        signable.push_back(header[5]);   // payload_len bytes (NBO)
-        signable.push_back(header[6]);
-        signable.push_back(header[7]);
-        signable.push_back(header[8]);
+        signable.reserve(5 + payload_len);
+        signable.insert(signable.end(), header + 4, header + 9);
         signable.insert(signable.end(), payload.begin(), payload.end());
 
-        if (!verifyHMAC(secret, signable.data(), signable.size(), received_hmac)) {
+        if (!verifyHMAC(secret,
+                        signable.data(), signable.size(),
+                        received_hmac)) {
             std::cerr << "WARN: rejected unauthenticated message from "
                       << peer_ip << std::endl;
             sendAckErr(client_fd, secret, "HMAC verification failed");
-            continue;   // stay connected per spec
+            continue;
         }
 
-        // ── 6. Dispatch ───────────────────────────────────────────
+        // ── Dispatch ──────────────────────────────────────────────
         std::vector<std::string> fields;
         size_t data_offset = 0;
 
         switch (msg_type) {
 
         // ── WRITE ─────────────────────────────────────────────────
-        // Payload: path\0 owner\0 perms\0 <file bytes>
+        // Payload fields: path, owner, perms  +  trailing file bytes
         case MSG_FORWARD_WRITE: {
             if (!unpackFields(payload, 3, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed WRITE payload");
@@ -197,18 +187,18 @@ static void handleConnection(int client_fd,
             }
             const std::string& path  = fields[0];
             const std::string& owner = fields[1];
-            uint16_t perms = static_cast<uint16_t>(std::stoul(fields[2]));
+            // perms field present in protocol but writeFile() doesn't
+            // accept it — FileSystem uses DEFAULT_FILE_PERMS internally.
             std::string data(payload.begin() + data_offset, payload.end());
 
-            bool ok = fs.writeFile(path, data, owner, perms);
+            bool ok = fs.writeFile(path, data, owner);
             if (ok) sendAckOk(client_fd, secret);
             else    sendAckErr(client_fd, secret, "write failed");
             break;
         }
 
         // ── READ ──────────────────────────────────────────────────
-        // Payload: path\0
-        // ACK_OK payload: <raw file bytes>
+        // ACK_OK payload: raw file bytes
         case MSG_FORWARD_READ: {
             if (!unpackFields(payload, 1, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed READ payload");
@@ -226,7 +216,6 @@ static void handleConnection(int client_fd,
         }
 
         // ── DELETE ────────────────────────────────────────────────
-        // Payload: path\0
         case MSG_FORWARD_DELETE: {
             if (!unpackFields(payload, 1, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed DELETE payload");
@@ -239,23 +228,22 @@ static void handleConnection(int client_fd,
         }
 
         // ── LIST ──────────────────────────────────────────────────
-        // Payload: path\0
         // ACK_OK payload: entry\0 entry\0 ...
         case MSG_FORWARD_LIST: {
             if (!unpackFields(payload, 1, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed LIST payload");
                 break;
             }
-            std::vector<std::string> entries;
-            bool ok = fs.listDir(fields[0], entries);
-            if (!ok) {
-                sendAckErr(client_fd, secret, "list failed");
+            std::vector<FileMetadata> entries;
+            try {
+                entries = fs.listDirectory(fields[0]);
+            } catch (const std::exception& e) {
+                sendAckErr(client_fd, secret, e.what());
                 break;
             }
-            // Pack entries as null-separated bytes.
             std::vector<uint8_t> resp;
-            for (const auto& e : entries) {
-                resp.insert(resp.end(), e.begin(), e.end());
+            for (const auto& m : entries) {
+                resp.insert(resp.end(), m.name.begin(), m.name.end());
                 resp.push_back('\0');
             }
             sendAckOk(client_fd, secret, resp);
@@ -263,34 +251,42 @@ static void handleConnection(int client_fd,
         }
 
         // ── MKDIR ─────────────────────────────────────────────────
-        // Payload: path\0 owner\0
         case MSG_FORWARD_MKDIR: {
             if (!unpackFields(payload, 2, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed MKDIR payload");
                 break;
             }
-            bool ok = fs.makeDir(fields[0], fields[1]);
+            bool ok = fs.createDirectory(fields[0], fields[1]);
             if (ok) sendAckOk(client_fd, secret);
             else    sendAckErr(client_fd, secret, "mkdir failed");
             break;
         }
 
         // ── STAT ──────────────────────────────────────────────────
-        // Payload: path\0
-        // ACK_OK payload: stat string bytes
+        // ACK_OK payload: formatted stat string
         case MSG_FORWARD_STAT: {
             if (!unpackFields(payload, 1, fields, data_offset)) {
                 sendAckErr(client_fd, secret, "malformed STAT payload");
                 break;
             }
-            std::string stat_str;
-            bool ok = fs.statFile(fields[0], stat_str);
-            if (ok) {
-                std::vector<uint8_t> resp(stat_str.begin(), stat_str.end());
-                sendAckOk(client_fd, secret, resp);
-            } else {
-                sendAckErr(client_fd, secret, "stat failed");
+            FileMetadata meta;
+            try {
+                meta = fs.getStat(fields[0]);
+            } catch (const std::exception& e) {
+                sendAckErr(client_fd, secret, e.what());
+                break;
             }
+            // Format: "name size perms owner created modified is_dir"
+            std::string stat_str =
+                meta.name                          + " " +
+                std::to_string(meta.size)          + " " +
+                std::to_string(meta.perms)         + " " +
+                meta.owner                         + " " +
+                std::to_string(meta.created)       + " " +
+                std::to_string(meta.modified)      + " " +
+                (meta.is_dir ? "dir" : "file");
+            std::vector<uint8_t> resp(stat_str.begin(), stat_str.end());
+            sendAckOk(client_fd, secret, resp);
             break;
         }
 
