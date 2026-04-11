@@ -145,79 +145,254 @@ void Coordinator::run()
 }
 
 // ===================================================================
-// CLIENT HANDLER — dispatcher scaffold, implement the handlers
+// CLIENT HANDLER
 // ===================================================================
 
 void Coordinator::handleClient(int client_fd)
 {
-    // TODO: implement
-    //
-    // This follows the same pattern as Checkpoint 1's handleClient:
-    //
-    // 1. Maintain a Session (authenticated flag + username).
-    //
-    // 2. Read commands with readLine(), tokenize, dispatch.
-    //
-    // 3. LOGIN and LOGOUT are handled locally using auth_.
-    //    All other commands are forwarded to storage nodes via
-    //    storage_a_ and storage_b_.
-    //
-    // For WRITE and DELETE:
-    //   - Acquire the write lock (acquireWriteLock).
-    //   - Forward to BOTH storage nodes.
-    //   - Wait for ACK_OK from both.
-    //   - Release the write lock.
-    //   - If either returns ACK_ERR, respond ERR_STORAGE_FAILURE.
-    //
-    // For READ, LIST, STAT, MKDIR:
-    //   - Forward to ONE storage node (your choice — either is fine
-    //     since replicas are identical).
-    //   - Return the result to the client.
-    //
-    // The client-facing protocol is identical to Checkpoint 1:
-    //   - Same command syntax
-    //   - Same response format (OK / ERR_ lines)
-    //   - READ sends "OK <byte_count>\n" then raw bytes
-    //   - LIST sends "OK <count>\n" then one line per entry
-    //
-    // Close the socket when the client disconnects.
+    bool authenticated = false;
+    std::string username;
 
-    (void)client_fd;
+    while (true) {
+        std::string line = readLine(client_fd);
+        if (line.empty()) break;
+
+        auto tokens = tokenize(line);
+        if (tokens.empty()) continue;
+
+        const std::string& cmd = tokens[0];
+
+        // ── LOGIN ────────────────────────────────────────────────
+        if (cmd == "LOGIN") {
+            if (tokens.size() < 3) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            if (auth_.verify(tokens[1], tokens[2])) {
+                authenticated = true;
+                username      = tokens[1];
+                sendResponse(client_fd, "OK");
+            } else {
+                sendResponse(client_fd, "ERR_AUTH_FAILED");
+            }
+            continue;
+        }
+
+        if (cmd == "LOGOUT") {
+            authenticated = false;
+            username.clear();
+            sendResponse(client_fd, "OK");
+            continue;
+        }
+
+        if (!authenticated) {
+            sendResponse(client_fd, "ERR_NOT_AUTHENTICATED");
+            continue;
+        }
+
+        // ── WRITE ────────────────────────────────────────────────
+        // Syntax: WRITE <path> <byte_count> <perms>
+        if (cmd == "WRITE") {
+            if (tokens.size() < 4) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            const std::string& path = tokens[1];
+            size_t   byte_count     = std::stoull(tokens[2]);
+            uint16_t perms          = static_cast<uint16_t>(std::stoul(tokens[3]));
+            std::string body        = readBytes(client_fd, byte_count);
+
+            if (!acquireWriteLock(path)) {
+                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+                continue;
+            }
+
+            AckResult ra = storage_a_.write(path, body, username, perms);
+            AckResult rb = storage_b_.write(path, body, username, perms);
+
+            releaseWriteLock(path);
+
+            if (ra.success && rb.success) {
+                sendResponse(client_fd, "OK");
+            } else {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            }
+            continue;
+        }
+
+        // ── DELETE ───────────────────────────────────────────────
+        // Syntax: DELETE <path>
+        if (cmd == "DELETE") {
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            const std::string& path = tokens[1];
+
+            if (!acquireWriteLock(path)) {
+                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+                continue;
+            }
+
+            AckResult ra = storage_a_.remove(path);
+            AckResult rb = storage_b_.remove(path);
+
+            releaseWriteLock(path);
+
+            if (ra.success && rb.success) {
+                sendResponse(client_fd, "OK");
+            } else {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            }
+            continue;
+        }
+
+        // ── READ ─────────────────────────────────────────────────
+        // Syntax: READ <path>
+        // Response: "OK <byte_count>\n" then raw bytes
+        if (cmd == "READ") {
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            std::string data;
+            AckResult r = storage_a_.read(tokens[1], data);
+            if (!r.success) {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            } else {
+                sendResponse(client_fd, "OK " + std::to_string(data.size()));
+                sendRaw(client_fd, data.c_str(), data.size());
+            }
+            continue;
+        }
+
+        // ── LIST ─────────────────────────────────────────────────
+        // Syntax: LIST <path>
+        // Response: "OK <count>\n" then one entry per line
+        if (cmd == "LIST") {
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            std::vector<std::string> entries;
+            AckResult r = storage_a_.list(tokens[1], entries);
+            if (!r.success) {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            } else {
+                sendResponse(client_fd, "OK " + std::to_string(entries.size()));
+                for (const auto& e : entries)
+                    sendResponse(client_fd, e);
+            }
+            continue;
+        }
+
+        // ── STAT ─────────────────────────────────────────────────
+        // Syntax: STAT <path>
+        if (cmd == "STAT") {
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            std::string stat_out;
+            AckResult r = storage_a_.stat(tokens[1], stat_out);
+            if (!r.success) {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            } else {
+                sendResponse(client_fd, "OK");
+                sendResponse(client_fd, stat_out);
+            }
+            continue;
+        }
+
+        // ── MKDIR ─────────────────────────────────────────────────
+        // Syntax: MKDIR <path>
+        if (cmd == "MKDIR") {
+            if (tokens.size() < 2) {
+                sendResponse(client_fd, "ERR_BAD_REQUEST");
+                continue;
+            }
+            // MKDIR is a metadata mutation — replicate to both nodes.
+            if (!acquireWriteLock(tokens[1])) {
+                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+                continue;
+            }
+
+            AckResult ra = storage_a_.mkdir(tokens[1], username);
+            AckResult rb = storage_b_.mkdir(tokens[1], username);
+
+            releaseWriteLock(tokens[1]);
+
+            if (ra.success && rb.success) {
+                sendResponse(client_fd, "OK");
+            } else {
+                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+            }
+            continue;
+        }
+
+        // ── Unknown command ───────────────────────────────────────
+        sendResponse(client_fd, "ERR_UNKNOWN_COMMAND");
+    }
+
     close(client_fd);
 }
 
 // ===================================================================
-// WRITE LOCK MANAGEMENT — implement both methods
+// WRITE LOCK MANAGEMENT
 // ===================================================================
 
 bool Coordinator::acquireWriteLock(const std::string& path)
 {
-    // TODO: implement
-    //
-    // Acquire the write lock for `path`.  If the lock is already
-    // held by another request, wait until it becomes available or
-    // the timeout (lock_timeout_s_ seconds) expires.
-    //
-    // If the timeout expires and the lock is still held, forcibly
-    // release it and log:
-    //   "WARN: forced lock release on <path> after timeout"
-    //
-    // Return true if the lock was acquired.
+    // Get (or create) the WriteLock entry for this path.
+    std::shared_ptr<WriteLock> wl;
+    {
+        std::lock_guard<std::mutex> map_guard(locks_map_mutex_);
+        auto it = write_locks_.find(path);
+        if (it == write_locks_.end()) {
+            wl = std::make_shared<WriteLock>();
+            write_locks_[path] = wl;
+        } else {
+            wl = it->second;
+        }
+    }
 
-    (void)path;
+    auto deadline = std::chrono::steady_clock::now()
+                    + std::chrono::seconds(lock_timeout_s_);
+
+    std::unique_lock<std::mutex> ul(wl->mtx);
+
+    // Wait until the lock is free or the timeout fires.
+    bool acquired = wl->cv.wait_until(ul, deadline,
+                                      [&wl]{ return !wl->locked; });
+
+    if (!acquired) {
+        // Timeout — forcibly steal the lock and warn.
+        std::cerr << "WARN: forced lock release on " << path
+                  << " after timeout" << std::endl;
+        // Fall through: we take the lock anyway.
+    }
+
+    wl->locked      = true;
+    wl->acquired_at = std::chrono::steady_clock::now();
     return true;
 }
 
 void Coordinator::releaseWriteLock(const std::string& path)
 {
-    // TODO: implement
-    //
-    // Release the write lock for `path` so queued requests can
-    // proceed.
+    std::shared_ptr<WriteLock> wl;
+    {
+        std::lock_guard<std::mutex> map_guard(locks_map_mutex_);
+        auto it = write_locks_.find(path);
+        if (it == write_locks_.end()) return;
+        wl = it->second;
+    }
 
-    (void)path;
+    {
+        std::lock_guard<std::mutex> ul(wl->mtx);
+        wl->locked = false;
+    }
+    wl->cv.notify_one();
 }
-
 // ===================================================================
 // MAIN — reads configuration from environment variables
 // ===================================================================

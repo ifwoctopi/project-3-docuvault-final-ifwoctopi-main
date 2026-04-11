@@ -11,17 +11,6 @@
 #include <thread>
 #include <unistd.h>
 
-// ===================================================================
-// Storage Node — accepts binary-framed requests from the Coordinator,
-// verifies HMAC authentication, executes file operations using your
-// Checkpoint 1 FileSystem class, and sends ACK responses.
-//
-// This is a NEW entry point — it does NOT use the text-based command
-// protocol from Checkpoint 1.  It reuses your FileSystem and block
-// storage code, but wraps it in the binary message protocol defined
-// in protocol.h.
-// ===================================================================
-
 // -------------------------------------------------------------------
 // Low-level I/O helpers — do not modify
 // -------------------------------------------------------------------
@@ -51,84 +40,266 @@ static bool recvAll(int fd, void* buf, size_t len)
 }
 
 // ===================================================================
-// HMAC VERIFICATION — implement this
+// HMAC VERIFICATION
 // ===================================================================
 
-// Compute HMAC-SHA256 over `data` (length `len`) using `secret`.
-// Write the 32-byte result into `out`.
 static void computeHMAC(const std::string& secret,
                         const uint8_t* data, size_t len,
                         uint8_t* out)
 {
-    // TODO: implement
-    //
-    // Use OpenSSL's HMAC() function from <openssl/hmac.h>.
-
-    (void)secret; (void)data; (void)len; (void)out;
+    unsigned int out_len = HMAC_SIZE;
+    HMAC(EVP_sha256(),
+         secret.data(), static_cast<int>(secret.size()),
+         data, len,
+         out, &out_len);
 }
 
-// Verify that the HMAC tag on a received frame is correct.
-// Returns true if the tag matches.
 static bool verifyHMAC(const std::string& secret,
                        const uint8_t* signable_data, size_t signable_len,
                        const uint8_t* received_hmac)
 {
-    // TODO: implement
-    //
-    // 1. Compute the expected HMAC over signable_data.
-    // 2. Compare it to received_hmac (constant-time comparison
-    //    is ideal but not required for this project).
-    // 3. Return true if they match.
-
-    (void)secret; (void)signable_data; (void)signable_len;
-    (void)received_hmac;
-    return false;
+    uint8_t expected[HMAC_SIZE];
+    computeHMAC(secret, signable_data, signable_len, expected);
+    return std::memcmp(expected, received_hmac, HMAC_SIZE) == 0;
 }
 
 // ===================================================================
-// FRAME SEND — implement this
+// FRAME SEND
 // ===================================================================
 
 static bool sendAck(int fd, const std::string& secret,
                     MessageType type,
                     const std::vector<uint8_t>& payload)
 {
-    // TODO: implement
-    //
-    // Build and send a response frame (ACK_OK or ACK_ERR):
-    //
-    // 1. Write the 4-byte magic (network byte order).
-    // 2. Write the 1-byte message type.
-    // 3. Write the 4-byte payload length (network byte order).
-    // 4. Write the payload.
-    // 5. Compute HMAC over (type + length + payload) and write it.
+    // 1. Magic (4 bytes, NBO)
+    uint32_t magic_ne = htonl(PROTO_MAGIC);
+    if (!sendAll(fd, &magic_ne, 4)) return false;
 
-    (void)fd; (void)secret; (void)type; (void)payload;
-    return false;
+    // 2. Message type (1 byte)
+    uint8_t type_byte = static_cast<uint8_t>(type);
+    if (!sendAll(fd, &type_byte, 1)) return false;
+
+    // 3. Payload length (4 bytes, NBO)
+    uint32_t plen_ne = htonl(static_cast<uint32_t>(payload.size()));
+    if (!sendAll(fd, &plen_ne, 4)) return false;
+
+    // 4. Payload bytes
+    if (!payload.empty())
+        if (!sendAll(fd, payload.data(), payload.size())) return false;
+
+    // 5. HMAC over signable region: type(1) + payload_len(4) + payload
+    std::vector<uint8_t> signable;
+    signable.reserve(1 + 4 + payload.size());
+    signable.push_back(type_byte);
+    // Append NBO payload length bytes directly
+    signable.push_back(static_cast<uint8_t>((payload.size() >> 24) & 0xFF));
+    signable.push_back(static_cast<uint8_t>((payload.size() >> 16) & 0xFF));
+    signable.push_back(static_cast<uint8_t>((payload.size() >>  8) & 0xFF));
+    signable.push_back(static_cast<uint8_t>( payload.size()        & 0xFF));
+    signable.insert(signable.end(), payload.begin(), payload.end());
+
+    uint8_t tag[HMAC_SIZE];
+    computeHMAC(secret, signable.data(), signable.size(), tag);
+    if (!sendAll(fd, tag, HMAC_SIZE)) return false;
+
+    return true;
+}
+
+// Convenience wrappers
+static bool sendAckOk(int fd, const std::string& secret,
+                      const std::vector<uint8_t>& payload = {})
+{
+    return sendAck(fd, secret, MSG_ACK_OK, payload);
+}
+
+static bool sendAckErr(int fd, const std::string& secret,
+                       const std::string& msg)
+{
+    std::vector<uint8_t> payload(msg.begin(), msg.end());
+    return sendAck(fd, secret, MSG_ACK_ERR, payload);
 }
 
 // ===================================================================
-// CONNECTION HANDLER — implement this
+// CONNECTION HANDLER
 // ===================================================================
 
 static void handleConnection(int client_fd,
                               FileSystem& fs,
                               const std::string& secret)
 {
-    // TODO: implement
-    //
-    // Loop: receive binary frames, dispatch to FileSystem, send ACKs.
-    //
-    // For each frame:
-    //   1. Read the header, payload, and HMAC tag.
-    //   2. Verify the magic number and HMAC.
-    //      If the HMAC is invalid, log:
-    //        "WARN: rejected unauthenticated message from <ip>"
-    //      and send ACK_ERR (but don't disconnect).
-    //   3. Dispatch the message type to the appropriate FileSystem
-    //      method and send an ACK response with any result data.
+    // Retrieve client IP for log messages.
+    sockaddr_in peer{};
+    socklen_t peer_len = sizeof(peer);
+    getpeername(client_fd,
+                reinterpret_cast<sockaddr*>(&peer), &peer_len);
+    char peer_ip[INET_ADDRSTRLEN] = "unknown";
+    inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
 
-    (void)client_fd; (void)fs; (void)secret;
+    while (true) {
+        // ── 1. Read 9-byte header ─────────────────────────────────
+        uint8_t header[FRAME_HEADER_SIZE];
+        if (!recvAll(client_fd, header, FRAME_HEADER_SIZE)) break;
+
+        // ── 2. Verify magic ───────────────────────────────────────
+        uint32_t magic = 0;
+        std::memcpy(&magic, header, 4);
+        magic = ntohl(magic);
+        if (magic != PROTO_MAGIC) {
+            std::cerr << "WARN: bad magic from " << peer_ip << std::endl;
+            break;
+        }
+
+        MessageType msg_type = static_cast<MessageType>(header[4]);
+
+        uint32_t plen_ne = 0;
+        std::memcpy(&plen_ne, header + 5, 4);
+        uint32_t payload_len = ntohl(plen_ne);
+
+        // ── 3. Read payload ───────────────────────────────────────
+        std::vector<uint8_t> payload(payload_len);
+        if (payload_len > 0)
+            if (!recvAll(client_fd, payload.data(), payload_len)) break;
+
+        // ── 4. Read HMAC tag ──────────────────────────────────────
+        uint8_t received_hmac[HMAC_SIZE];
+        if (!recvAll(client_fd, received_hmac, HMAC_SIZE)) break;
+
+        // ── 5. Verify HMAC over type(1) + payload_len(4) + payload ─
+        // Re-use the raw NBO bytes from the header (header[4..8]).
+        std::vector<uint8_t> signable;
+        signable.reserve(1 + 4 + payload_len);
+        signable.push_back(header[4]);   // type byte
+        signable.push_back(header[5]);   // payload_len bytes (NBO)
+        signable.push_back(header[6]);
+        signable.push_back(header[7]);
+        signable.push_back(header[8]);
+        signable.insert(signable.end(), payload.begin(), payload.end());
+
+        if (!verifyHMAC(secret, signable.data(), signable.size(), received_hmac)) {
+            std::cerr << "WARN: rejected unauthenticated message from "
+                      << peer_ip << std::endl;
+            sendAckErr(client_fd, secret, "HMAC verification failed");
+            continue;   // stay connected per spec
+        }
+
+        // ── 6. Dispatch ───────────────────────────────────────────
+        std::vector<std::string> fields;
+        size_t data_offset = 0;
+
+        switch (msg_type) {
+
+        // ── WRITE ─────────────────────────────────────────────────
+        // Payload: path\0 owner\0 perms\0 <file bytes>
+        case MSG_FORWARD_WRITE: {
+            if (!unpackFields(payload, 3, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed WRITE payload");
+                break;
+            }
+            const std::string& path  = fields[0];
+            const std::string& owner = fields[1];
+            uint16_t perms = static_cast<uint16_t>(std::stoul(fields[2]));
+            std::string data(payload.begin() + data_offset, payload.end());
+
+            bool ok = fs.writeFile(path, data, owner, perms);
+            if (ok) sendAckOk(client_fd, secret);
+            else    sendAckErr(client_fd, secret, "write failed");
+            break;
+        }
+
+        // ── READ ──────────────────────────────────────────────────
+        // Payload: path\0
+        // ACK_OK payload: <raw file bytes>
+        case MSG_FORWARD_READ: {
+            if (!unpackFields(payload, 1, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed READ payload");
+                break;
+            }
+            std::string data;
+            bool ok = fs.readFile(fields[0], data);
+            if (ok) {
+                std::vector<uint8_t> resp(data.begin(), data.end());
+                sendAckOk(client_fd, secret, resp);
+            } else {
+                sendAckErr(client_fd, secret, "file not found");
+            }
+            break;
+        }
+
+        // ── DELETE ────────────────────────────────────────────────
+        // Payload: path\0
+        case MSG_FORWARD_DELETE: {
+            if (!unpackFields(payload, 1, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed DELETE payload");
+                break;
+            }
+            bool ok = fs.deleteFile(fields[0]);
+            if (ok) sendAckOk(client_fd, secret);
+            else    sendAckErr(client_fd, secret, "delete failed");
+            break;
+        }
+
+        // ── LIST ──────────────────────────────────────────────────
+        // Payload: path\0
+        // ACK_OK payload: entry\0 entry\0 ...
+        case MSG_FORWARD_LIST: {
+            if (!unpackFields(payload, 1, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed LIST payload");
+                break;
+            }
+            std::vector<std::string> entries;
+            bool ok = fs.listDir(fields[0], entries);
+            if (!ok) {
+                sendAckErr(client_fd, secret, "list failed");
+                break;
+            }
+            // Pack entries as null-separated bytes.
+            std::vector<uint8_t> resp;
+            for (const auto& e : entries) {
+                resp.insert(resp.end(), e.begin(), e.end());
+                resp.push_back('\0');
+            }
+            sendAckOk(client_fd, secret, resp);
+            break;
+        }
+
+        // ── MKDIR ─────────────────────────────────────────────────
+        // Payload: path\0 owner\0
+        case MSG_FORWARD_MKDIR: {
+            if (!unpackFields(payload, 2, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed MKDIR payload");
+                break;
+            }
+            bool ok = fs.makeDir(fields[0], fields[1]);
+            if (ok) sendAckOk(client_fd, secret);
+            else    sendAckErr(client_fd, secret, "mkdir failed");
+            break;
+        }
+
+        // ── STAT ──────────────────────────────────────────────────
+        // Payload: path\0
+        // ACK_OK payload: stat string bytes
+        case MSG_FORWARD_STAT: {
+            if (!unpackFields(payload, 1, fields, data_offset)) {
+                sendAckErr(client_fd, secret, "malformed STAT payload");
+                break;
+            }
+            std::string stat_str;
+            bool ok = fs.statFile(fields[0], stat_str);
+            if (ok) {
+                std::vector<uint8_t> resp(stat_str.begin(), stat_str.end());
+                sendAckOk(client_fd, secret, resp);
+            } else {
+                sendAckErr(client_fd, secret, "stat failed");
+            }
+            break;
+        }
+
+        default:
+            sendAckErr(client_fd, secret, "unknown message type");
+            break;
+        }
+    }
+
     close(client_fd);
 }
 
@@ -141,7 +312,6 @@ int main(int argc, char* argv[])
     int port = 9001;
     std::string data_dir = "/data/store";
 
-    // Parse optional port override.
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--port" && i + 1 < argc) {
@@ -151,7 +321,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Read the shared secret from the environment.
     const char* env_secret = std::getenv("DOCUVAULT_SECRET");
     if (!env_secret || std::strlen(env_secret) == 0) {
         std::cerr << "ERROR: DOCUVAULT_SECRET environment variable not set"
@@ -160,12 +329,10 @@ int main(int argc, char* argv[])
     }
     std::string secret = env_secret;
 
-    // Initialize the file system (reuses your Checkpoint 1 code).
     FileSystem fs(data_dir);
 
     std::cout << "Storage node starting on port " << port << std::endl;
 
-    // Create listening socket.
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         std::cerr << "ERROR: socket() failed: " << strerror(errno) << std::endl;
@@ -194,7 +361,6 @@ int main(int argc, char* argv[])
 
     std::cout << "Storage node listening on port " << port << std::endl;
 
-    // Accept loop — one thread per connection.
     while (true) {
         sockaddr_in client_addr{};
         socklen_t   client_len = sizeof(client_addr);

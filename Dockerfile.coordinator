@@ -10,9 +10,10 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # --- TODO 1: Install build dependencies ---
-# You need: g++, libssl-dev (for OpenSSL HMAC), and any other
-# packages your coordinator requires.
-
+RUN apt-get update && apt-get install -y \
+    g++ \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # --- Working directory ---
 WORKDIR /app
@@ -22,16 +23,15 @@ COPY src/ src/
 COPY data/ /data/
 
 # --- TODO 2: Compile the coordinator ---
-# Compile coordinator.cpp, storage_client.cpp, and auth.cpp into
-# a single binary.  Link against OpenSSL and pthreads.
-#
-# Note: the coordinator does NOT compile fs.cpp — it has no local
-# file storage.  It only needs auth (for login) and the storage
-# client (for forwarding).
-
+RUN g++ -std=c++17 -O2 -pthread \
+    src/coordinator.cpp \
+    src/storage_client.cpp \
+    src/auth.cpp \
+    -o docuvault_coordinator \
+    -lssl -lcrypto
 
 # --- TODO 3: Expose the coordinator's client-facing port ---
-
+EXPOSE 8080
 
 # --- Start the coordinator ---
 CMD ["./docuvault_coordinator"]
