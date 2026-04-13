@@ -288,23 +288,20 @@ void Coordinator::handleClient(int client_fd)
             continue;
         }
 
-        // ── STAT ─────────────────────────────────────────────────
-        // Syntax: STAT <path>
-        if (cmd == "STAT") {
-            if (tokens.size() < 2) {
-                sendResponse(client_fd, "ERR_BAD_REQUEST");
-                continue;
-            }
-            std::string stat_out;
-            AckResult r = storage_a_.stat(tokens[1], stat_out);
-            if (!r.success) {
-                sendResponse(client_fd, "ERR_STORAGE_FAILURE");
-            } else {
-                sendResponse(client_fd, "OK");
-                sendResponse(client_fd, stat_out);
-            }
-            continue;
-        }
+       if (cmd == "STAT") {
+    if (tokens.size() < 2) {
+        sendResponse(client_fd, "ERR_BAD_REQUEST");
+        continue;
+    }
+    std::string stat_out;
+    AckResult r = storage_a_.stat(tokens[1], stat_out);
+    if (!r.success) {
+        sendResponse(client_fd, "ERR_STORAGE_FAILURE");
+    } else {
+        sendResponse(client_fd, "OK " + stat_out);  // single line
+    }
+    continue;
+}
 
  // ── MKDIR ────────────────────────────────────────────────
 // Syntax: MKDIR <path>
