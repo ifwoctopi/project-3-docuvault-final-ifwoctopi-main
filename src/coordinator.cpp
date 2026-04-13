@@ -306,36 +306,33 @@ void Coordinator::handleClient(int client_fd)
             continue;
         }
 
-        // ── MKDIR ────────────────────────────────────────────────
-        // Syntax: MKDIR <path>
-        if (cmd == "MKDIR") {
-            if (tokens.size() < 2) {
-                sendResponse(client_fd, "ERR_BAD_REQUEST");
-                continue;
-            }
-            const std::string& path = tokens[1];
+// ── MKDIR ────────────────────────────────────────────────
+// Syntax: MKDIR <path>
+if (cmd == "MKDIR") {
+    if (tokens.size() < 2) {
+        sendResponse(client_fd, "ERR_BAD_REQUEST");
+        continue;
+    }
+    const std::string& path = tokens[1];
 
-            if (!acquireWriteLock(path)) {
-                sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
-                continue;
-            }
-
-            AckResult ra = storage_a_.mkdir(path, username);
-            AckResult rb = storage_b_.mkdir(path, username);
-
-            releaseWriteLock(path);
-
-            if (ra.success && rb.success)
-                sendResponse(client_fd, "OK");
-            else
-                sendResponse(client_fd, ra.success ? rb.error_msg : ra.error_msg);
-            continue;
-        }
-
-        sendResponse(client_fd, "ERR_UNKNOWN_COMMAND");
+    if (!acquireWriteLock(path)) {
+        sendResponse(client_fd, "ERR_LOCK_TIMEOUT");
+        continue;
     }
 
-    close(client_fd);
+    AckResult ra = storage_a_.mkdir(path, username);
+    AckResult rb = storage_b_.mkdir(path, username);
+
+    releaseWriteLock(path);
+
+    bool a_ok = ra.success || ra.error_msg == "ERR_ALREADY_EXISTS";
+    bool b_ok = rb.success || rb.error_msg == "ERR_ALREADY_EXISTS";
+
+    if (a_ok && b_ok)
+        sendResponse(client_fd, "OK");
+    else
+        sendResponse(client_fd, !ra.success ? ra.error_msg : rb.error_msg);
+    continue;
 }
 
 // ===================================================================
