@@ -306,7 +306,7 @@ void Coordinator::handleClient(int client_fd)
             continue;
         }
 
-// ── MKDIR ────────────────────────────────────────────────
+ // ── MKDIR ────────────────────────────────────────────────
 // Syntax: MKDIR <path>
 if (cmd == "MKDIR") {
     if (tokens.size() < 2) {
@@ -333,6 +333,13 @@ if (cmd == "MKDIR") {
     else
         sendResponse(client_fd, !ra.success ? ra.error_msg : rb.error_msg);
     continue;
+}
+
+        // ── UNKNOWN COMMAND ─────────────────────────────────────
+        sendResponse(client_fd, "ERR_UNKNOWN_COMMAND");
+    }
+
+    close(client_fd);
 }
 
 // ===================================================================
